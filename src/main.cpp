@@ -2,6 +2,7 @@
 #define UNICODE
 #endif
 
+#include <assert.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,7 +19,7 @@ const char *vertex_shader_source =
 
     "out vec3 color;\n"
 
-    "uniform float modifier;\n"
+    "uniform float modifier = 1.0;\n"
 
     "void main()\n"
     "{\n"
@@ -37,10 +38,6 @@ const char *fragment_shader_source =
     "    fragColor = vec4(color, 1.0f);\n"
     "}\n\0";
 
-// Used for timing
-static int64_t perf_freq;
-static int64_t initial_perf_count;
-
 const float vertices[] = {
      0.5f,  0.5f, 0.0f, 1.0f, 0.0f, 0.0f, // top right
      0.5f, -0.5f, 0.0f, 0.0f, 1.0f, 0.0f, // bottom right
@@ -53,7 +50,19 @@ const unsigned int indices[] = {
     0, 2, 3, // second triangle
 };
 
-const float clear_color[] = { 0.1f, 0.1f, 0.1f, 1.0f };
+const float background_color[] = { 0.1f, 0.1f, 0.1f, 1.0f };
+const int window_width = 800;
+const int window_height = 600;
+
+// --------------------------------------------------
+// ----- GLOBALS
+// Used for timing
+static int64_t perf_freq;
+static int64_t initial_perf_count;
+
+static HGLRC gl_render_context;
+static unsigned int shader_program;
+// --------------------------------------------------
 
 int64_t get_perf_count() {
     LARGE_INTEGER count;
@@ -69,17 +78,119 @@ void timer_init() {
 }
 
 double time_duration_seconds(int64_t start_count, int64_t end_count) {
-    double result = (double)(end_count - start_count) / perf_freq;
-    return result;
+    return (double)(end_count - start_count) / perf_freq;
 }
 
 double get_time_now() {
     int64_t count_now = get_perf_count();
-    double duration_since_init = time_duration_seconds(initial_perf_count, count_now);
-    return duration_since_init;
+    return time_duration_seconds(initial_perf_count, count_now);
 }
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+struct WindowData {
+    HWND hwnd;
+    CRITICAL_SECTION crit_sect;
+    CONDITION_VARIABLE cond_var;
+    int width;
+    int height;
+    int new_width;
+    int new_height;
+    bool size_changed;
+    bool terminate;
+};
+
+void render_thread_func(WindowData *data) {
+    GLsync fence;
+
+    HDC hdc = GetDC(data->hwnd);
+    wglMakeCurrent(hdc, gl_render_context);
+
+    // While the main thread hasn't signaled to stop
+    bool terminate = false;
+    while (!terminate) {
+        EnterCriticalSection(&data->crit_sect);
+        terminate = data->terminate;
+        bool size_changed = data->size_changed;
+        data->size_changed = false;
+        LeaveCriticalSection(&data->crit_sect);
+
+        if (size_changed) {
+            RECT rect;
+            GetClientRect(data->hwnd, &rect);
+            glViewport(0, 0, rect.right, rect.bottom);
+        }
+
+        // Set uniform for animation
+        float time = (float)get_time_now();
+        glUseProgram(shader_program);
+        GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
+        glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * time) + 0.5f);
+
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        SwapBuffers(hdc);
+
+        fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (fence) {
+            glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1'000'000'000);
+            glDeleteSync(fence);
+        }
+
+        WakeConditionVariable(&data->cond_var);
+    }
+
+    ReleaseDC(data->hwnd, hdc);
+    OutputDebugStringA("RenderThread exiting\n");
+
+    WakeConditionVariable(&data->cond_var);
+}
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    WindowData *data = (WindowData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (uMsg) {
+    case WM_CLOSE: {
+        EnterCriticalSection(&data->crit_sect);
+        data->terminate = true;
+        LeaveCriticalSection(&data->crit_sect);
+
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
+    case WM_DESTROY: {DeleteCriticalSection(&data->crit_sect);
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    case WM_PAINT: {
+        BeginPaint(hwnd, NULL);
+
+        EnterCriticalSection(&data->crit_sect);
+
+        if ((data->width != data->new_width) | (data->height != data->new_height)) {
+            data->new_width = data->width;
+            data->new_height = data->height;
+            data->size_changed = true;
+        }
+
+        SleepConditionVariableCS(&data->cond_var, &data->crit_sect, INFINITE);
+        LeaveCriticalSection(&data->crit_sect);
+
+        EndPaint(hwnd, NULL);
+        return 0;
+    }
+
+    case WM_SIZE: {
+        data->width = LOWORD(lParam);
+        data->height = HIWORD(lParam);
+        return 0;
+    }
+
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+}
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // SetProcessDPIAware();
@@ -92,7 +203,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     WNDCLASSEX wind_class = {};
     wind_class.cbSize = sizeof(WNDCLASSEX);
     wind_class.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC; // The first two flags together say: "WM_SIZE should trigger WM_PAINT"
-    wind_class.lpfnWndProc = WindowProc;
+    wind_class.lpfnWndProc = DefWindowProc; // Use default proc until everything is set up
     wind_class.hInstance = hInstance;
     wind_class.hCursor = LoadCursor(NULL, IDC_ARROW);
     wind_class.hbrBackground = NULL; // We replace the window's entire contents every frame ourselves
@@ -108,7 +219,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         wind_class.lpszClassName,
         L"RenderThread",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        window_width, window_height,
         NULL,
         NULL,
         hInstance,
@@ -141,7 +253,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     }
     SetPixelFormat(hdc, pf, &pfd);
 
-    HGLRC gl_render_context = wglCreateContext(hdc);
+    gl_render_context = wglCreateContext(hdc);
     wglMakeCurrent(hdc, gl_render_context);
 
     if (!gladLoadGL()) {
@@ -149,8 +261,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
-    // MessageBoxA(0,(char*)glGetString(GL_VERSION), "OPENGL VERSION", 0);
-
+    // Enable V-Sync if possible
     typedef BOOL(WINAPI *wglSwapIntervalEXT_t)(int interval);
     wglSwapIntervalEXT_t wglSwapInterval = (wglSwapIntervalEXT_t)wglGetProcAddress("wglSwapIntervalEXT");
     if (!wglSwapInterval) {
@@ -175,7 +286,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     glGetShaderiv(vertex_shader, GL_COMPILE_STATUS, &success);
     if (!success)
     {
-        glGetShaderInfoLog(vertex_shader, 512, NULL, info_log);
+        glGetShaderInfoLog(vertex_shader, sizeof(info_log), NULL, info_log);
         sprintf_s(err_buf, sizeof(err_buf), "Vertex shader compilation failed\n%s\n", info_log);
         OutputDebugStringA(err_buf);
     }
@@ -187,19 +298,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &success);
     if (!success)
     {
-        glGetShaderInfoLog(vertex_shader, 512, NULL, info_log);
+        glGetShaderInfoLog(vertex_shader, sizeof(info_log), NULL, info_log);
         sprintf_s(err_buf, sizeof(err_buf), "Fragment shader compilation failed\n%s\n", info_log);
         OutputDebugStringA(err_buf);
     }
 
-    unsigned int shader_program = glCreateProgram();
+    shader_program = glCreateProgram();
     glAttachShader(shader_program, vertex_shader);
     glAttachShader(shader_program, fragment_shader);
     glLinkProgram(shader_program);
 
     glGetProgramiv(shader_program, GL_LINK_STATUS, &success);
     if (!success) {
-        glGetProgramInfoLog(shader_program, 512, NULL, info_log);
+        glGetProgramInfoLog(shader_program, sizeof(info_log), NULL, info_log);
         sprintf_s(err_buf, sizeof(err_buf), "Shader program linking failed\n%s\n", info_log);
         OutputDebugStringA(err_buf);
     }
@@ -232,16 +343,33 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
 
     //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // Draw wireframe polygons
 
-    // --------------------------------------------------
-    // ----- Show window and enter main loop
-    // --------------------------------------------------
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
+    glClearColor(background_color[0], background_color[1], background_color[2], background_color[3]);
 
+    // --------------------------------------------------
+    // ----- Prepare and create render thread
+    // --------------------------------------------------
+    wglMakeCurrent(hdc, NULL);
+
+    WindowData *data = new WindowData; // TODO: memory 'leak'
+    data->hwnd = hwnd;
+    InitializeCriticalSection(&data->crit_sect);
+    InitializeConditionVariable(&data->cond_var);
+    data->size_changed = false;
+    data->terminate = false;
+
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data); // Attach data to window
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)WindowProc); // Attach window procedure
+
+    HANDLE thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)render_thread_func, data, 0, NULL);
+
+    UpdateWindow(hwnd);
+    ShowWindow(hwnd, SW_SHOW);
+
+    // --------------------------------------------------
+    // ----- Enter main program loop
+    // --------------------------------------------------
     bool should_quit = false;
     while (!should_quit) {
-        int64_t frame_begin = get_perf_count();
-
         // Drain the message queue first
         MSG msg;
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -250,60 +378,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                 should_quit = true;
             case WM_KEYDOWN:
                 if (msg.wParam == VK_ESCAPE)
-                    PostQuitMessage(0);
+                    PostMessage(hwnd, WM_CLOSE, NULL, NULL);
             }
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
 
-        // Set uniform for animation
-        float time = (float)get_time_now();
-        glUseProgram(shader_program);
-        GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
-        glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * time) + 0.5f);
-
-        glClearColor(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-
-        SwapBuffers(hdc);
-
-        // Insert frame time into window title
-        int64_t frame_end = get_perf_count();
-        float frame_time = (float)time_duration_seconds(frame_begin, frame_end);
-        wchar_t buf[64];
-        swprintf(buf, sizeof(buf), L"RenderThread - frame time: %fs", frame_time);
-        SetWindowText(hwnd, buf);
+        if (!should_quit)
+            WaitMessage();
     }
 
+    // Stop and wait on render thread before exiting
+    WaitForSingleObject(thread, INFINITE);
+
+    // Clean up, if necessary
     wglDeleteContext(gl_render_context);
 
     return 0;
-}
-
-// TODO: All code interfacing with OpenGL will need to move to seperate thread
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-    case WM_DESTROY: {
-        PostQuitMessage(0);
-        return 0;
-    }
-
-    case WM_PAINT: {
-        BeginPaint(hwnd, NULL);
-        EndPaint(hwnd, NULL);
-        return 0;
-    }
-
-    case WM_SIZE: {
-        UINT width = LOWORD(lParam);
-        UINT height = HIWORD(lParam);
-        glViewport(0, 0, width, height);
-        return 0;
-    }
-
-    default:
-        return DefWindowProc(hwnd, uMsg, wParam, lParam);
-    }
 }
