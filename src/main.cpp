@@ -86,6 +86,10 @@ double get_time_now() {
     return time_duration_seconds(initial_perf_count, count_now);
 }
 
+bool is_key_repeating(LPARAM lParam) {
+    return (lParam & (1 << 30)) >> 30;
+}
+
 struct WindowData {
     HWND hwnd;
     CRITICAL_SECTION crit_sect;
@@ -96,6 +100,7 @@ struct WindowData {
     int new_height;
     bool size_changed;
     bool terminate;
+    bool animate;
 };
 
 void render_thread_func(WindowData *data) {
@@ -104,14 +109,29 @@ void render_thread_func(WindowData *data) {
     HDC hdc = GetDC(data->hwnd);
     wglMakeCurrent(hdc, gl_render_context);
 
+    float time = (float)get_time_now();
+    float start_time = time;
+
     // While the main thread hasn't signaled to stop
-    bool terminate = false;
-    while (!terminate) {
+    while (true) {
         EnterCriticalSection(&data->crit_sect);
-        terminate = data->terminate;
+
+        float sleep_time = 0;
+        if (!data->animate && !data->size_changed) {
+            float before_sleep_time = (float)get_time_now();
+            SleepConditionVariableCS(&data->cond_var, &data->crit_sect, INFINITE);
+            float end_sleep_time = (float)get_time_now();
+            sleep_time = end_sleep_time - before_sleep_time;
+        }
+
+        bool terminate = data->terminate;
+        bool animate = data->animate;
         bool size_changed = data->size_changed;
         data->size_changed = false;
+
         LeaveCriticalSection(&data->crit_sect);
+
+        if (terminate) break;
 
         if (size_changed) {
             RECT rect;
@@ -119,11 +139,12 @@ void render_thread_func(WindowData *data) {
             glViewport(0, 0, rect.right, rect.bottom);
         }
 
-        // Set uniform for animation
-        float time = (float)get_time_now();
         glUseProgram(shader_program);
-        GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
-        glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * time) + 0.5f);
+
+        if (animate) {
+            GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
+            glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * time) + 0.5f);
+        }
 
         glClear(GL_COLOR_BUFFER_BIT);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
@@ -136,7 +157,15 @@ void render_thread_func(WindowData *data) {
             glDeleteSync(fence);
         }
 
+        float end_time = (float)get_time_now();
+        time += end_time - start_time - sleep_time;
+        start_time = end_time;
+
         WakeConditionVariable(&data->cond_var);
+
+        // TODO: Setting the window title in this way is broken when sleeping this thread
+        // swprintf(buf, sizeof(buf), L"RenderThread - frame time: %fms", frame_time);
+        // SetWindowText(data->hwnd, buf);
     }
 
     ReleaseDC(data->hwnd, hdc);
@@ -152,6 +181,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_CLOSE: {
         EnterCriticalSection(&data->crit_sect);
         data->terminate = true;
+        WakeConditionVariable(&data->cond_var);
         LeaveCriticalSection(&data->crit_sect);
 
         DestroyWindow(hwnd);
@@ -174,6 +204,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             data->size_changed = true;
         }
 
+        WakeConditionVariable(&data->cond_var);
         SleepConditionVariableCS(&data->cond_var, &data->crit_sect, INFINITE);
         LeaveCriticalSection(&data->crit_sect);
 
@@ -217,7 +248,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     HWND hwnd = CreateWindowEx(
         0,
         wind_class.lpszClassName,
-        L"RenderThread",
+        L"Press Space to pause/resume animation",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         window_width, window_height,
@@ -356,6 +387,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     InitializeConditionVariable(&data->cond_var);
     data->size_changed = false;
     data->terminate = false;
+    data->animate = false;
 
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data); // Attach data to window
     SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)WindowProc); // Attach window procedure
@@ -379,6 +411,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
             case WM_KEYDOWN:
                 if (msg.wParam == VK_ESCAPE)
                     PostMessage(hwnd, WM_CLOSE, NULL, NULL);
+                else if (msg.wParam == VK_SPACE && !is_key_repeating(msg.lParam)) {
+                    EnterCriticalSection(&data->crit_sect);
+                    data->animate = !data->animate;
+                    WakeConditionVariable(&data->cond_var);
+                    LeaveCriticalSection(&data->crit_sect);
+                }
             }
             TranslateMessage(&msg);
             DispatchMessage(&msg);
