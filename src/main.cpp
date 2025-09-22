@@ -50,6 +50,7 @@ const unsigned int indices[] = {
     0, 2, 3, // second triangle
 };
 
+const float pi = 3.14159265358979f;
 const float background_color[] = { 0.1f, 0.1f, 0.1f, 1.0f };
 const int window_width = 800;
 const int window_height = 600;
@@ -143,7 +144,7 @@ void render_thread_func(WindowData *data) {
 
         if (animate) {
             GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
-            glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * time) + 0.5f);
+            glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * (time + pi / 4)) + 0.75f);
         }
 
         glClear(GL_COLOR_BUFFER_BIT);
