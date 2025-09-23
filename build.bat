@@ -12,4 +12,3 @@ set LinkFlags=%Libs%
 
 cl %CompileFlags% %ProjectRoot%\src\main.cpp %ProjectRoot%\src\glad.c /link %LinkFlags%
 popd
-

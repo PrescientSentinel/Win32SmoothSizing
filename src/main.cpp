@@ -10,7 +10,11 @@
 #include <windows.h>
 
 #include "glad/glad.h"
+#include "glad/glad_wgl.h"
 
+
+// --------------------------------------------------
+// ----- DATA
 const char *vertex_shader_source =
     "#version 330 core\n"
 
@@ -38,7 +42,7 @@ const char *fragment_shader_source =
     "    fragColor = vec4(color, 1.0f);\n"
     "}\n\0";
 
-const float vertices[] = {
+const float vertices[] = {                // (x, y, z, r, g, b)
      0.5f,  0.5f, 0.0f, 1.0f, 0.0f, 0.0f, // top right
      0.5f, -0.5f, 0.0f, 0.0f, 1.0f, 0.0f, // bottom right
     -0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 1.0f, // bottom left
@@ -50,10 +54,22 @@ const unsigned int indices[] = {
     0, 2, 3, // second triangle
 };
 
+// --------------------------------------------------
+// ----- CONSTANTS
 const float pi = 3.14159265358979f;
 const float background_color[] = { 0.1f, 0.1f, 0.1f, 1.0f };
 const int window_width = 800;
 const int window_height = 600;
+
+// --------------------------------------------------
+// ----- OPENGL
+typedef BOOL WINAPI FNWGLCHOOSEPIXELFORMATARBPROC(HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
+typedef HGLRC WINAPI FNWGLCREATECONTEXTATTRIBSARBPROC(HDC hDC, HGLRC hShareContext, const int *attribList);
+typedef BOOL WINAPI FNWGLSWAPINTERVALEXTPROC(int interval);
+
+FNWGLCHOOSEPIXELFORMATARBPROC *wglChoosePixelFormatARB = nullptr;
+FNWGLCREATECONTEXTATTRIBSARBPROC *wglCreateContextAttribsARB = nullptr;
+FNWGLSWAPINTERVALEXTPROC *wglSwapIntervalEXT = nullptr;
 
 // --------------------------------------------------
 // ----- GLOBALS
@@ -63,8 +79,9 @@ static int64_t initial_perf_count;
 
 static HGLRC gl_render_context;
 static unsigned int shader_program;
-// --------------------------------------------------
 
+// --------------------------------------------------
+// ----- HELPERS
 int64_t get_perf_count() {
     LARGE_INTEGER count;
     QueryPerformanceCounter(&count);
@@ -90,6 +107,7 @@ double get_time_now() {
 bool is_key_repeating(LPARAM lParam) {
     return (lParam & (1 << 30)) >> 30;
 }
+// --------------------------------------------------
 
 struct WindowData {
     HWND hwnd;
@@ -285,25 +303,51 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     }
     SetPixelFormat(hdc, pf, &pfd);
 
-    gl_render_context = wglCreateContext(hdc);
-    wglMakeCurrent(hdc, gl_render_context);
+    HGLRC dummy_context = wglCreateContext(hdc);
+    wglMakeCurrent(hdc, dummy_context);
 
     if (!gladLoadGL()) {
         OutputDebugString(L"Could not load OpenGL functions\n");
         return 0;
     }
 
-    // Enable V-Sync if possible
-    typedef BOOL(WINAPI *wglSwapIntervalEXT_t)(int interval);
-    wglSwapIntervalEXT_t wglSwapInterval = (wglSwapIntervalEXT_t)wglGetProcAddress("wglSwapIntervalEXT");
-    if (!wglSwapInterval) {
-        OutputDebugString(L"Could not load wglSwapInterval function. Cannot enable V-Sync\n");
-        // TODO: If we cannot enable V-Sync and it is not enabled on a system level, we should
-        // probably sleep to not consume CPU needlessly
-    }
-    else {
-        wglSwapInterval(1); // Enable V-Sync
-    }
+    // Load GL extension functions
+    wglChoosePixelFormatARB = (FNWGLCHOOSEPIXELFORMATARBPROC*)wglGetProcAddress("wglChoosePixelFormatARB");
+    wglCreateContextAttribsARB = (FNWGLCREATECONTEXTATTRIBSARBPROC*)wglGetProcAddress("wglCreateContextAttribsARB");
+    wglSwapIntervalEXT = (FNWGLSWAPINTERVALEXTPROC*)wglGetProcAddress("wglSwapIntervalEXT");
+
+    int pf_attribs[] = {
+      WGL_DRAW_TO_WINDOW_ARB, 1,
+      WGL_SUPPORT_OPENGL_ARB, 1,
+      WGL_DOUBLE_BUFFER_ARB, 1,
+      WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
+      WGL_COLOR_BITS_ARB, 32,
+      WGL_DEPTH_BITS_ARB, 24,
+      WGL_STENCIL_BITS_ARB, 8,
+      0
+    };
+
+    UINT num_formats = 0;
+    pf = 0;
+    // Just get one pixel format
+    wglChoosePixelFormatARB(hdc, pf_attribs, 0, 1, &pf, &num_formats);
+
+    int context_attribs[] = {
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+        0,
+    };
+
+    // Set global real context
+    gl_render_context = wglCreateContextAttribsARB(hdc, dummy_context, NULL);
+    wglMakeCurrent(hdc, 0);
+    wglDeleteContext(dummy_context);
+    wglMakeCurrent(hdc, gl_render_context);
+
+    MessageBoxA(0, (char*)glGetString(GL_VERSION), "OPENGL VERSION", 0);
+
+    wglSwapIntervalEXT(1); // V-Sync
+    // TODO: If not enabling V-Sync, we should probably sleep the render thread to not consume CPU
 
     // --------------------------------------------------
     // ----- Compile shaders and create shader program
