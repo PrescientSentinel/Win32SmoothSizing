@@ -12,7 +12,6 @@
 #include "glad/glad.h"
 #include "glad/glad_wgl.h"
 
-
 // --------------------------------------------------
 // ----- DATA
 const char *vertex_shader_source =
@@ -344,7 +343,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     wglDeleteContext(dummy_context);
     wglMakeCurrent(hdc, gl_render_context);
 
-    MessageBoxA(0, (char*)glGetString(GL_VERSION), "OPENGL VERSION", 0);
+    // MessageBoxA(0, (char*)glGetString(GL_VERSION), "OPENGL VERSION", 0);
 
     wglSwapIntervalEXT(1); // V-Sync
     // TODO: If not enabling V-Sync, we should probably sleep the render thread to not consume CPU
