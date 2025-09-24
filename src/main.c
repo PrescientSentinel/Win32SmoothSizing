@@ -4,6 +4,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -75,13 +76,13 @@ static GLuint shader_program;
 
 // --------------------------------------------------
 // ----- HELPERS
-int64_t get_perf_count() {
+int64_t get_perf_count(void) {
     LARGE_INTEGER count;
     QueryPerformanceCounter(&count);
     return (int64_t)count.QuadPart;
 }
 
-void timer_init() {
+void timer_init(void) {
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     perf_freq =  freq.QuadPart;
@@ -92,7 +93,7 @@ double time_duration_seconds(int64_t start_count, int64_t end_count) {
     return (double)(end_count - start_count) / (double)perf_freq;
 }
 
-double get_time_now() {
+double get_time_now(void) {
     int64_t count_now = get_perf_count();
     return time_duration_seconds(initial_perf_count, count_now);
 }
@@ -102,7 +103,7 @@ bool is_key_repeating(LPARAM lParam) {
 }
 // --------------------------------------------------
 
-struct WindowData {
+typedef struct {
     HWND hwnd;
     CRITICAL_SECTION crit_sect;
     CONDITION_VARIABLE cond_var;
@@ -113,7 +114,7 @@ struct WindowData {
     bool size_changed;
     bool terminate;
     bool animate;
-};
+} WindowData;
 
 DWORD render_thread_func(LPVOID lParam) {
     WindowData* window = (WindowData*)lParam;
@@ -241,7 +242,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     }
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nShowCmd) {
+    (void)hPrevInstance; (void)lpCmdLine; (void)nShowCmd;
+
     SetProcessDPIAware();
     timer_init();
 
@@ -337,7 +340,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     };
 
     // Set global real context
-    render_context = wglCreateContextAttribsARB(hdc, dummy_context, NULL);
+    render_context = wglCreateContextAttribsARB(hdc, dummy_context, context_attribs);
     wglMakeCurrent(hdc, 0);
     wglDeleteContext(dummy_context);
     wglMakeCurrent(hdc, render_context);
@@ -421,7 +424,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // --------------------------------------------------
     wglMakeCurrent(hdc, NULL);
 
-    WindowData *window = new WindowData; // TODO: memory 'leak'
+    WindowData *window = (WindowData*)malloc(sizeof(WindowData)); // TODO: memory 'leak'
+    memset(window, 0, sizeof(*window));
     window->hwnd = hwnd;
     InitializeCriticalSection(&window->crit_sect);
     InitializeConditionVariable(&window->cond_var);
@@ -450,7 +454,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                 should_quit = true;
             case WM_KEYDOWN:
                 if (msg.wParam == VK_ESCAPE)
-                    PostMessage(hwnd, WM_CLOSE, NULL, NULL);
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
                 else if (msg.wParam == VK_SPACE && !is_key_repeating(msg.lParam)) {
                     EnterCriticalSection(&window->crit_sect);
                     window->animate = !window->animate;
