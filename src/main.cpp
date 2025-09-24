@@ -12,6 +12,10 @@
 #include "glad/glad.h"
 #include "glad/glad_wgl.h"
 
+#pragma comment(lib, "user32")
+#pragma comment(lib, "gdi32")
+#pragma comment(lib, "opengl32")
+
 // --------------------------------------------------
 // ----- DATA
 const char *vertex_shader_source =
@@ -56,7 +60,6 @@ const unsigned int indices[] = {
 // --------------------------------------------------
 // ----- CONSTANTS
 const float pi = 3.14159265358979f;
-const float background_color[] = { 0.1f, 0.1f, 0.1f, 1.0f };
 const int window_width = 800;
 const int window_height = 600;
 
@@ -66,8 +69,9 @@ const int window_height = 600;
 static int64_t perf_freq;
 static int64_t initial_perf_count;
 
-static HGLRC gl_render_context;
-static unsigned int shader_program;
+static HGLRC render_context;
+static GLuint vao;
+static GLuint shader_program;
 
 // --------------------------------------------------
 // ----- HELPERS
@@ -85,7 +89,7 @@ void timer_init() {
 }
 
 double time_duration_seconds(int64_t start_count, int64_t end_count) {
-    return (double)(end_count - start_count) / perf_freq;
+    return (double)(end_count - start_count) / (double)perf_freq;
 }
 
 double get_time_now() {
@@ -111,11 +115,12 @@ struct WindowData {
     bool animate;
 };
 
-void render_thread_func(WindowData *window) {
+DWORD render_thread_func(LPVOID lParam) {
+    WindowData* window = (WindowData*)lParam;
     GLsync fence;
 
     HDC hdc = GetDC(window->hwnd);
-    wglMakeCurrent(hdc, gl_render_context);
+    wglMakeCurrent(hdc, render_context);
 
     float time = (float)get_time_now();
     float start_time = time;
@@ -151,13 +156,20 @@ void render_thread_func(WindowData *window) {
 
         if (animate) {
             GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
-            glUniform1f(modifier_uniform, 0.25f * sinf(2.0f * (time + pi / 4)) + 0.75f);
+            glUniform1f(modifier_uniform, 0.25f * sinf(4.0f * (time + pi / 8.0f)) + 0.75f);
         }
+
+        float back_color = 1 - (0.5f * sinf(2.0f * time + pi / 2.0f) + 0.5f);
+        glClearColor(back_color, back_color, back_color, 1.0f);
 
         glClear(GL_COLOR_BUFFER_BIT);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
         SwapBuffers(hdc);
+
+#ifdef NO_VSYNC
+        Sleep(1);
+#endif
 
         fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         if (fence) {
@@ -176,6 +188,8 @@ void render_thread_func(WindowData *window) {
     OutputDebugStringA("RenderThread exiting\n");
 
     WakeConditionVariable(&window->cond_var);
+
+    return 0;
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -234,7 +248,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // --------------------------------------------------
     // ----- Create the window
     // --------------------------------------------------
-    // Register the window class
     WNDCLASSEX wind_class = {};
     wind_class.cbSize = sizeof(WNDCLASSEX);
     wind_class.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC; // The first two flags together say: "WM_SIZE should trigger WM_PAINT"
@@ -252,7 +265,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     HWND hwnd = CreateWindowEx(
         0,
         wind_class.lpszClassName,
-        L"Press Space to pause/resume animation",
+        L"SPC to pause/resume | ESC to exit",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         window_width, window_height,
@@ -297,7 +310,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     }
 
     if (!gladLoadWGL(hdc)) {
-        OutputDebugString(L"Could not load OpenGL functions\n");
+        OutputDebugString(L"Could not load WGL functions\n");
         return 1;
     }
 
@@ -324,20 +337,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     };
 
     // Set global real context
-    gl_render_context = wglCreateContextAttribsARB(hdc, dummy_context, NULL);
+    render_context = wglCreateContextAttribsARB(hdc, dummy_context, NULL);
     wglMakeCurrent(hdc, 0);
     wglDeleteContext(dummy_context);
-    wglMakeCurrent(hdc, gl_render_context);
+    wglMakeCurrent(hdc, render_context);
 
-    // MessageBoxA(0, (char*)glGetString(GL_VERSION), "OPENGL VERSION", 0);
-
-    wglSwapIntervalEXT(1); // V-Sync
-    // TODO: If not enabling V-Sync, we should probably sleep the render thread to not consume CPU
+#ifdef NO_VSYNC
+    wglSwapIntervalEXT(0);
+#else
+    wglSwapIntervalEXT(1);
+#endif
 
     // --------------------------------------------------
     // ----- Compile shaders and create shader program
     // --------------------------------------------------
-    unsigned int vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+    GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertex_shader, 1, &vertex_shader_source, NULL);
     glCompileShader(vertex_shader);
 
@@ -352,7 +366,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
         OutputDebugStringA(err_buf);
     }
 
-    unsigned int fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+    GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fragment_shader, 1, &fragment_shader_source, NULL);
     glCompileShader(fragment_shader);
 
@@ -381,7 +395,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // --------------------------------------------------
     // ----- Set up vertex data and attributes
     // --------------------------------------------------
-    unsigned int vao, vbo, ebo;
+    GLuint vbo, ebo;
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
     glGenBuffers(1, &ebo);
@@ -401,10 +415,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // Colours
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-
-    //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // Draw wireframe polygons
-
-    glClearColor(background_color[0], background_color[1], background_color[2], background_color[3]);
 
     // --------------------------------------------------
     // ----- Prepare and create render thread
@@ -460,7 +470,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     WaitForSingleObject(thread, INFINITE);
 
     // Clean up, if necessary
-    wglDeleteContext(gl_render_context);
+    wglDeleteContext(render_context);
 
     return 0;
 }

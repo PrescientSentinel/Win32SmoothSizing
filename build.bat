@@ -5,10 +5,10 @@ set ProjectRoot=%CD%
 if not exist build md build
 pushd build
 
-set Libs=user32.lib gdi32.lib opengl32.lib
-set CompileFlags=/nologo /W4 /Zi /I%ProjectRoot%\include /FeRenderThread
-@REM /DEBUG for Linker to combine debug info from multiple object files
-set LinkFlags=%Libs%
+set CompileFlags=/nologo /std:c++14 /W4 /Zi /O2 /I%ProjectRoot%\include /FeRenderThread
 
-cl %CompileFlags% %ProjectRoot%\src\main.cpp %ProjectRoot%\src\glad.c %ProjectRoot%\src\glad_wgl.c /link %LinkFlags%
+set cmd=cl %CompileFlags% %ProjectRoot%\src\main.cpp %ProjectRoot%\src\glad.c %ProjectRoot%\src\glad_wgl.c
+echo %cmd%
+%cmd%
+
 popd
