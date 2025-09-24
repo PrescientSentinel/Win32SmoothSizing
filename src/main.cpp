@@ -61,16 +61,6 @@ const int window_width = 800;
 const int window_height = 600;
 
 // --------------------------------------------------
-// ----- OPENGL
-typedef BOOL WINAPI FNWGLCHOOSEPIXELFORMATARBPROC(HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
-typedef HGLRC WINAPI FNWGLCREATECONTEXTATTRIBSARBPROC(HDC hDC, HGLRC hShareContext, const int *attribList);
-typedef BOOL WINAPI FNWGLSWAPINTERVALEXTPROC(int interval);
-
-FNWGLCHOOSEPIXELFORMATARBPROC *wglChoosePixelFormatARB = nullptr;
-FNWGLCREATECONTEXTATTRIBSARBPROC *wglCreateContextAttribsARB = nullptr;
-FNWGLSWAPINTERVALEXTPROC *wglSwapIntervalEXT = nullptr;
-
-// --------------------------------------------------
 // ----- GLOBALS
 // Used for timing
 static int64_t perf_freq;
@@ -121,10 +111,10 @@ struct WindowData {
     bool animate;
 };
 
-void render_thread_func(WindowData *data) {
+void render_thread_func(WindowData *window) {
     GLsync fence;
 
-    HDC hdc = GetDC(data->hwnd);
+    HDC hdc = GetDC(window->hwnd);
     wglMakeCurrent(hdc, gl_render_context);
 
     float time = (float)get_time_now();
@@ -132,28 +122,28 @@ void render_thread_func(WindowData *data) {
 
     // While the main thread hasn't signaled to stop
     while (true) {
-        EnterCriticalSection(&data->crit_sect);
+        EnterCriticalSection(&window->crit_sect);
 
         float sleep_time = 0;
-        if (!data->animate && !data->size_changed) {
+        if (!window->animate && !window->size_changed) {
             float before_sleep_time = (float)get_time_now();
-            SleepConditionVariableCS(&data->cond_var, &data->crit_sect, INFINITE);
+            SleepConditionVariableCS(&window->cond_var, &window->crit_sect, INFINITE);
             float end_sleep_time = (float)get_time_now();
             sleep_time = end_sleep_time - before_sleep_time;
         }
 
-        bool terminate = data->terminate;
-        bool animate = data->animate;
-        bool size_changed = data->size_changed;
-        data->size_changed = false;
+        bool terminate = window->terminate;
+        bool animate = window->animate;
+        bool size_changed = window->size_changed;
+        window->size_changed = false;
 
-        LeaveCriticalSection(&data->crit_sect);
+        LeaveCriticalSection(&window->crit_sect);
 
         if (terminate) break;
 
         if (size_changed) {
             RECT rect;
-            GetClientRect(data->hwnd, &rect);
+            GetClientRect(window->hwnd, &rect);
             glViewport(0, 0, rect.right, rect.bottom);
         }
 
@@ -179,34 +169,30 @@ void render_thread_func(WindowData *data) {
         time += end_time - start_time - sleep_time;
         start_time = end_time;
 
-        WakeConditionVariable(&data->cond_var);
-
-        // TODO: Setting the window title in this way is broken when sleeping this thread
-        // swprintf(buf, sizeof(buf), L"RenderThread - frame time: %fms", frame_time);
-        // SetWindowText(data->hwnd, buf);
+        WakeConditionVariable(&window->cond_var);
     }
 
-    ReleaseDC(data->hwnd, hdc);
+    ReleaseDC(window->hwnd, hdc);
     OutputDebugStringA("RenderThread exiting\n");
 
-    WakeConditionVariable(&data->cond_var);
+    WakeConditionVariable(&window->cond_var);
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    WindowData *data = (WindowData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    WindowData *window = (WindowData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
     switch (uMsg) {
     case WM_CLOSE: {
-        EnterCriticalSection(&data->crit_sect);
-        data->terminate = true;
-        WakeConditionVariable(&data->cond_var);
-        LeaveCriticalSection(&data->crit_sect);
+        EnterCriticalSection(&window->crit_sect);
+        window->terminate = true;
+        WakeConditionVariable(&window->cond_var);
+        LeaveCriticalSection(&window->crit_sect);
 
         DestroyWindow(hwnd);
         return 0;
     }
 
-    case WM_DESTROY: {DeleteCriticalSection(&data->crit_sect);
+    case WM_DESTROY: {DeleteCriticalSection(&window->crit_sect);
         PostQuitMessage(0);
         return 0;
     }
@@ -214,25 +200,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     case WM_PAINT: {
         BeginPaint(hwnd, NULL);
 
-        EnterCriticalSection(&data->crit_sect);
+        EnterCriticalSection(&window->crit_sect);
 
-        if ((data->width != data->new_width) | (data->height != data->new_height)) {
-            data->new_width = data->width;
-            data->new_height = data->height;
-            data->size_changed = true;
+        if ((window->width != window->new_width) | (window->height != window->new_height)) {
+            window->new_width = window->width;
+            window->new_height = window->height;
+            window->size_changed = true;
         }
 
-        WakeConditionVariable(&data->cond_var);
-        SleepConditionVariableCS(&data->cond_var, &data->crit_sect, INFINITE);
-        LeaveCriticalSection(&data->crit_sect);
+        WakeConditionVariable(&window->cond_var);
+        SleepConditionVariableCS(&window->cond_var, &window->crit_sect, INFINITE);
+        LeaveCriticalSection(&window->crit_sect);
 
         EndPaint(hwnd, NULL);
         return 0;
     }
 
     case WM_SIZE: {
-        data->width = LOWORD(lParam);
-        data->height = HIWORD(lParam);
+        window->width = LOWORD(lParam);
+        window->height = HIWORD(lParam);
         return 0;
     }
 
@@ -242,7 +228,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
-    // SetProcessDPIAware();
+    SetProcessDPIAware();
     timer_init();
 
     // --------------------------------------------------
@@ -307,13 +293,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
 
     if (!gladLoadGL()) {
         OutputDebugString(L"Could not load OpenGL functions\n");
-        return 0;
+        return 1;
     }
 
-    // Load GL extension functions
-    wglChoosePixelFormatARB = (FNWGLCHOOSEPIXELFORMATARBPROC*)wglGetProcAddress("wglChoosePixelFormatARB");
-    wglCreateContextAttribsARB = (FNWGLCREATECONTEXTATTRIBSARBPROC*)wglGetProcAddress("wglCreateContextAttribsARB");
-    wglSwapIntervalEXT = (FNWGLSWAPINTERVALEXTPROC*)wglGetProcAddress("wglSwapIntervalEXT");
+    if (!gladLoadWGL(hdc)) {
+        OutputDebugString(L"Could not load OpenGL functions\n");
+        return 1;
+    }
 
     int pf_attribs[] = {
       WGL_DRAW_TO_WINDOW_ARB, 1,
@@ -425,18 +411,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // --------------------------------------------------
     wglMakeCurrent(hdc, NULL);
 
-    WindowData *data = new WindowData; // TODO: memory 'leak'
-    data->hwnd = hwnd;
-    InitializeCriticalSection(&data->crit_sect);
-    InitializeConditionVariable(&data->cond_var);
-    data->size_changed = false;
-    data->terminate = false;
-    data->animate = false;
+    WindowData *window = new WindowData; // TODO: memory 'leak'
+    window->hwnd = hwnd;
+    InitializeCriticalSection(&window->crit_sect);
+    InitializeConditionVariable(&window->cond_var);
+    window->size_changed = false;
+    window->terminate = false;
+    window->animate = false;
 
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data); // Attach data to window
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)window); // Attach data to window
     SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)WindowProc); // Attach window procedure
 
-    HANDLE thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)render_thread_func, data, 0, NULL);
+    HANDLE thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)render_thread_func, window, 0, NULL);
 
     UpdateWindow(hwnd);
     ShowWindow(hwnd, SW_SHOW);
@@ -456,10 +442,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                 if (msg.wParam == VK_ESCAPE)
                     PostMessage(hwnd, WM_CLOSE, NULL, NULL);
                 else if (msg.wParam == VK_SPACE && !is_key_repeating(msg.lParam)) {
-                    EnterCriticalSection(&data->crit_sect);
-                    data->animate = !data->animate;
-                    WakeConditionVariable(&data->cond_var);
-                    LeaveCriticalSection(&data->crit_sect);
+                    EnterCriticalSection(&window->crit_sect);
+                    window->animate = !window->animate;
+                    WakeConditionVariable(&window->cond_var);
+                    LeaveCriticalSection(&window->crit_sect);
                 }
             }
             TranslateMessage(&msg);
