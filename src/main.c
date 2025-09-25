@@ -2,7 +2,6 @@
 #define UNICODE
 #endif
 
-#include <assert.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -153,6 +152,7 @@ DWORD render_thread_func(LPVOID lParam) {
             glViewport(0, 0, rect.right, rect.bottom);
         }
 
+        glBindVertexArray(vao);
         glUseProgram(shader_program);
 
         if (animate) {
@@ -165,6 +165,9 @@ DWORD render_thread_func(LPVOID lParam) {
 
         glClear(GL_COLOR_BUFFER_BIT);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        glUseProgram(0);
+        glBindVertexArray(0);
 
         SwapBuffers(hdc);
 
@@ -418,6 +421,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     // Colours
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
+    
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
 
     // --------------------------------------------------
     // ----- Prepare and create render thread
