@@ -2,7 +2,6 @@
 #define UNICODE
 #endif
 
-#include <assert.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -152,6 +151,7 @@ DWORD render_thread_func(LPVOID lParam) {
             glViewport(0, 0, rect.right, rect.bottom);
         }
 
+        glBindVertexArray(vao);
         glUseProgram(shader_program);
 
         if (animate) {
@@ -164,6 +164,9 @@ DWORD render_thread_func(LPVOID lParam) {
 
         glClear(GL_COLOR_BUFFER_BIT);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        glUseProgram(0);
+        glBindVertexArray(0);
 
         SwapBuffers(hdc);
 
@@ -337,7 +340,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     };
 
     // Set global real context
-    render_context = wglCreateContextAttribsARB(hdc, dummy_context, NULL);
+    render_context = wglCreateContextAttribsARB(hdc, dummy_context, context_attribs);
     wglMakeCurrent(hdc, 0);
     wglDeleteContext(dummy_context);
     wglMakeCurrent(hdc, render_context);
@@ -416,6 +419,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
     // --------------------------------------------------
     // ----- Prepare and create render thread
     // --------------------------------------------------
@@ -450,7 +456,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                 should_quit = true;
             case WM_KEYDOWN:
                 if (msg.wParam == VK_ESCAPE)
-                    PostMessage(hwnd, WM_CLOSE, NULL, NULL);
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
                 else if (msg.wParam == VK_SPACE && !is_key_repeating(msg.lParam)) {
                     EnterCriticalSection(&window->crit_sect);
                     window->animate = !window->animate;
