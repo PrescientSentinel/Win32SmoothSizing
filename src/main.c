@@ -102,6 +102,12 @@ bool is_key_repeating(LPARAM lParam) {
 }
 // --------------------------------------------------
 
+enum EventFlags {
+    EVENT_TERMINATE        = 1 << 0,
+    EVENT_SIZE_CHANGED     = 1 << 1,
+    EVENT_TOGGLE_ANIMATION = 1 << 2,
+};
+
 typedef struct {
     HWND hwnd;
     CRITICAL_SECTION crit_sect;
@@ -110,9 +116,7 @@ typedef struct {
     int height;
     int new_width;
     int new_height;
-    bool size_changed;
-    bool terminate;
-    bool animate;
+    uint32_t flags;
 } WindowData;
 
 DWORD render_thread_func(LPVOID lParam) {
@@ -122,40 +126,42 @@ DWORD render_thread_func(LPVOID lParam) {
     HDC hdc = GetDC(window->hwnd);
     wglMakeCurrent(hdc, render_context);
 
-    float time = (float)get_time_now();
+    float time = 0.0f;
     float start_time = time;
+    bool animating = false;
 
     // While the main thread hasn't signaled to stop
     while (true) {
         EnterCriticalSection(&window->crit_sect);
 
         float sleep_time = 0;
-        if (!window->animate && !window->size_changed) {
+
+        if (!animating && !window->flags) {
             float before_sleep_time = (float)get_time_now();
             SleepConditionVariableCS(&window->cond_var, &window->crit_sect, INFINITE);
             float end_sleep_time = (float)get_time_now();
             sleep_time = end_sleep_time - before_sleep_time;
         }
 
-        bool terminate = window->terminate;
-        bool animate = window->animate;
-        bool size_changed = window->size_changed;
-        window->size_changed = false;
+        uint64_t flags = window->flags; // Cache this frame's flags
+        window->flags = 0;              // Reset next frame's flags
 
         LeaveCriticalSection(&window->crit_sect);
 
-        if (terminate) break;
+        if (flags & EVENT_TERMINATE) break;
 
-        if (size_changed) {
+        if (flags & EVENT_SIZE_CHANGED) {
             RECT rect;
             GetClientRect(window->hwnd, &rect);
             glViewport(0, 0, rect.right, rect.bottom);
         }
 
+        if (flags & EVENT_TOGGLE_ANIMATION) animating = !animating;
+
         glBindVertexArray(vao);
         glUseProgram(shader_program);
 
-        if (animate) {
+        if (animating) {
             GLint modifier_uniform = glGetUniformLocation(shader_program, "modifier");
             glUniform1f(modifier_uniform, 0.25f * sinf(4.0f * (time + pi / 8.0f)) + 0.75f);
         }
@@ -182,7 +188,12 @@ DWORD render_thread_func(LPVOID lParam) {
         }
 
         float end_time = (float)get_time_now();
-        time += end_time - start_time - sleep_time;
+        if (animating) {
+            time += end_time - start_time - sleep_time;
+            if (time > 2 * pi) {
+                time -= (2 *pi);
+            }
+        }
         start_time = end_time;
 
         WakeConditionVariable(&window->cond_var);
@@ -202,7 +213,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg) {
     case WM_CLOSE: {
         EnterCriticalSection(&window->crit_sect);
-        window->terminate = true;
+        window->flags |= EVENT_TERMINATE;
         WakeConditionVariable(&window->cond_var);
         LeaveCriticalSection(&window->crit_sect);
 
@@ -210,7 +221,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
-    case WM_DESTROY: {DeleteCriticalSection(&window->crit_sect);
+    case WM_DESTROY: {
+        DeleteCriticalSection(&window->crit_sect);
         PostQuitMessage(0);
         return 0;
     }
@@ -223,7 +235,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if ((window->width != window->new_width) | (window->height != window->new_height)) {
             window->new_width = window->width;
             window->new_height = window->height;
-            window->size_changed = true;
+            window->flags |= EVENT_SIZE_CHANGED;
         }
 
         WakeConditionVariable(&window->cond_var);
@@ -271,7 +283,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     HWND hwnd = CreateWindowEx(
         0,
         wind_class.lpszClassName,
-        L"SPC to pause/resume | ESC to exit",
+        L"SPC to pause/resume | ESC to quit",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         window_width, window_height,
@@ -435,9 +447,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     window->hwnd = hwnd;
     InitializeCriticalSection(&window->crit_sect);
     InitializeConditionVariable(&window->cond_var);
-    window->size_changed = false;
-    window->terminate = false;
-    window->animate = false;
+    window->flags = 0;
 
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)window); // Attach data to window
     SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)WindowProc); // Attach window procedure
@@ -463,7 +473,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
                     PostMessage(hwnd, WM_CLOSE, 0, 0);
                 else if (msg.wParam == VK_SPACE && !is_key_repeating(msg.lParam)) {
                     EnterCriticalSection(&window->crit_sect);
-                    window->animate = !window->animate;
+                    window->flags |= EVENT_TOGGLE_ANIMATION;
                     WakeConditionVariable(&window->cond_var);
                     LeaveCriticalSection(&window->crit_sect);
                 }
