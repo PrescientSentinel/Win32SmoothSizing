@@ -4,7 +4,7 @@ https://github.com/user-attachments/assets/3dde2eef-fc58-4b5f-a008-102c48b614df
 
 This program is written to show how a Windows app can be resized and moved while displaying animation at a high frame rate and without rendering artifacts. It is based off of the repo [JaiRenderThreadExample](https://github.com/CookedNick/JaiRenderThreadExample) by [CookedNick](https://github.com/CookedNick) which was written in Jai. See that repo for a more detailed explaination of the problem and this particular solution.
 
-It is written in C++ and uses OpenGL. There is also a C branch which is almost exactly the same.
+It is written in C and uses OpenGL. It also compiles as C++.
 
 This was also an exercise for me to learn some basic Win32 and OpenGL so there may be better ways to do this or some of this might be bad. The only external code used was from [Glad](https://glad.dav1d.de/), of which the generated files are included.
 

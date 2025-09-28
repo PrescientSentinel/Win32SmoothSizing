@@ -3,9 +3,12 @@
 #endif
 
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include "glad/glad.h"
@@ -101,13 +104,13 @@ bool is_key_repeating(LPARAM lParam) {
 }
 // --------------------------------------------------
 
-enum EventFlags : uint32_t {
-    Terminate       = 1 << 0,
-    SizeChanged     = 1 << 1,
-    ToggleAnimation = 1 << 2,
+enum EventFlags {
+    EVENT_TERMINATE       = 1 << 0,
+    EVENT_SIZECHANGED     = 1 << 1,
+    EVENT_TOGGLEANIMATION = 1 << 2,
 };
 
-struct WindowData {
+typedef struct {
     HWND hwnd;
     CRITICAL_SECTION crit_sect;
     CONDITION_VARIABLE cond_var;
@@ -116,7 +119,7 @@ struct WindowData {
     int new_width;
     int new_height;
     uint32_t flags;
-};
+} WindowData;
 
 DWORD render_thread_func(LPVOID lParam) {
     WindowData* window = (WindowData*)lParam;
@@ -147,15 +150,15 @@ DWORD render_thread_func(LPVOID lParam) {
 
         LeaveCriticalSection(&window->crit_sect);
 
-        if (flags & EventFlags::Terminate) break;
+        if (flags & EVENT_TERMINATE) break;
 
-        if (flags & EventFlags::SizeChanged) {
+        if (flags & EVENT_SIZECHANGED) {
             RECT rect;
             GetClientRect(window->hwnd, &rect);
             glViewport(0, 0, rect.right, rect.bottom);
         }
 
-        if (flags & EventFlags::ToggleAnimation) animating = !animating;
+        if (flags & EVENT_TOGGLEANIMATION) animating = !animating;
 
         glBindVertexArray(vao);
         glUseProgram(shader_program);
@@ -212,7 +215,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     switch (uMsg) {
     case WM_CLOSE: {
         EnterCriticalSection(&window->crit_sect);
-        window->flags |= EventFlags::Terminate;
+        window->flags |= EVENT_TERMINATE;
         WakeConditionVariable(&window->cond_var);
         LeaveCriticalSection(&window->crit_sect);
 
@@ -234,7 +237,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if ((window->width != window->new_width) | (window->height != window->new_height)) {
             window->new_width = window->width;
             window->new_height = window->height;
-            window->flags |= EventFlags::SizeChanged;
+            window->flags |= EVENT_SIZECHANGED;
         }
 
         WakeConditionVariable(&window->cond_var);
@@ -256,7 +259,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     }
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nShowCmd) {
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nShowCmd);
+
     SetProcessDPIAware();
     timer_init();
 
@@ -439,7 +446,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // --------------------------------------------------
     wglMakeCurrent(hdc, NULL);
 
-    WindowData *window = new WindowData; // TODO: memory 'leak'
+    WindowData *window = (WindowData*)malloc(sizeof(WindowData));
+    memset(window, 0, sizeof(*window));
     window->hwnd = hwnd;
     InitializeCriticalSection(&window->crit_sect);
     InitializeConditionVariable(&window->cond_var);
@@ -469,7 +477,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
                     PostMessage(hwnd, WM_CLOSE, 0, 0);
                 else if (msg.wParam == VK_SPACE && !is_key_repeating(msg.lParam)) {
                     EnterCriticalSection(&window->crit_sect);
-                    window->flags |= EventFlags::ToggleAnimation;
+                    window->flags |= EVENT_TOGGLEANIMATION;
                     WakeConditionVariable(&window->cond_var);
                     LeaveCriticalSection(&window->crit_sect);
                 }
